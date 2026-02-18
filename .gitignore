@@ -9,10 +9,9 @@ venv/
 env/
 
 # Database (her deploy'da yeniden oluşturulur)
-# NOT: Render'da persistent disk kullanılıyorsa bu satırı kaldırın
-# license.db
-# license.db-shm
-# license.db-wal
+license.db
+license.db-shm
+license.db-wal
 
 # Env files (secrets Render dashboard'dan girilir)
 .env
