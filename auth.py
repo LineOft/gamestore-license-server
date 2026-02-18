@@ -99,8 +99,8 @@ class JWTManager:
 class BruteForceProtection:
     """IP bazlı brute force koruması."""
     
-    MAX_ATTEMPTS = 5
-    LOCKOUT_MINUTES = 15
+    MAX_ATTEMPTS = 10
+    LOCKOUT_MINUTES = 2
     
     def __init__(self):
         self._attempts: Dict[str, list] = {}
@@ -159,7 +159,7 @@ class BruteForceProtection:
 class RateLimiter:
     """IP bazlı rate limiting."""
     
-    def __init__(self, max_requests: int = 30, window_seconds: int = 60):
+    def __init__(self, max_requests: int = 60, window_seconds: int = 60):
         self._max = max_requests
         self._window = window_seconds
         self._requests: Dict[str, list] = {}
