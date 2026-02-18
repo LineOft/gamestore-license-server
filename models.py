@@ -22,123 +22,219 @@ from contextlib import contextmanager
 DB_DIR = Path(__file__).parent
 DB_PATH = DB_DIR / "license.db"
 
+# Bulut PostgreSQL bağlantı adresi (varsa PG, yoksa lokal SQLite)
+DATABASE_URL = os.environ.get("DATABASE_URL")
+
+
+# ============================================================
+# CURSOR SARMALAYICI (SQLite ↔ PostgreSQL uyumluluk)
+# ============================================================
+
+class _CursorProxy:
+    """SQL parametre ve sonuç farkını şeffaf şekilde giderir.
+    
+    - SQLite: parametre = ?,  tarih = str,  bool = 0/1
+    - PostgreSQL: parametre = %s, tarih = datetime obj, bool = True/False
+    Bu sınıf farkı şeffaf kapatır — üst katman hiçbir şey değiştirmez.
+    """
+
+    def __init__(self, cursor, is_postgres: bool):
+        self._cur = cursor
+        self._pg = is_postgres
+
+    def execute(self, sql, params=None):
+        if self._pg:
+            sql = sql.replace("?", "%s")
+        if params:
+            self._cur.execute(sql, params)
+        else:
+            self._cur.execute(sql)
+
+    def fetchone(self):
+        row = self._cur.fetchone()
+        if row is None:
+            return None
+        d = dict(row) if not isinstance(row, dict) else dict(row)
+        if self._pg:
+            # PostgreSQL datetime → ISO string (mevcut kodla uyumluluk)
+            for k, v in d.items():
+                if isinstance(v, datetime):
+                    d[k] = v.isoformat()
+        return d
+
+    def fetchall(self):
+        rows = self._cur.fetchall()
+        result = []
+        for r in rows:
+            d = dict(r) if not isinstance(r, dict) else dict(r)
+            if self._pg:
+                for k, v in d.items():
+                    if isinstance(v, datetime):
+                        d[k] = v.isoformat()
+            result.append(d)
+        return result
+
+    @property
+    def rowcount(self):
+        return self._cur.rowcount
+
+    @property
+    def lastrowid(self):
+        if self._pg:
+            return None
+        return self._cur.lastrowid
+
 
 # ============================================================
 # DATABASE BAĞLANTI YÖNETİCİSİ
 # ============================================================
 
 class Database:
-    """Thread-safe SQLite bağlantı yöneticisi."""
+    """Thread-safe SQLite / PostgreSQL bağlantı yöneticisi.
     
+    DATABASE_URL ortam değişkeni varsa → PostgreSQL (bulut, kalıcı)
+    Yoksa → SQLite (lokal geliştirme)
+    """
+
     _local = threading.local()
-    
-    def __init__(self, db_path: str = None):
-        self.db_path = db_path or str(DB_PATH)
+
+    def __init__(self, db_url: str = None):
+        self._db_url = db_url or DATABASE_URL
+        self._is_postgres = bool(self._db_url and "postgres" in self._db_url)
+
+        if self._is_postgres:
+            self.db_path = "(PostgreSQL Cloud)"
+        else:
+            self.db_path = str(DB_PATH)
+
         self._init_db()
-    
-    def _get_conn(self) -> sqlite3.Connection:
+
+    def _get_conn(self):
         """Thread-local bağlantı döndürür."""
-        if not hasattr(self._local, 'conn') or self._local.conn is None:
-            self._local.conn = sqlite3.connect(self.db_path)
-            self._local.conn.row_factory = sqlite3.Row
-            self._local.conn.execute("PRAGMA journal_mode=WAL")
-            self._local.conn.execute("PRAGMA foreign_keys=ON")
-        return self._local.conn
-    
+        if self._is_postgres:
+            import psycopg2
+            conn = getattr(self._local, 'conn', None)
+            if conn is None or conn.closed:
+                self._local.conn = psycopg2.connect(self._db_url)
+            return self._local.conn
+        else:
+            if not hasattr(self._local, 'conn') or self._local.conn is None:
+                self._local.conn = sqlite3.connect(self.db_path)
+                self._local.conn.row_factory = sqlite3.Row
+                self._local.conn.execute("PRAGMA journal_mode=WAL")
+                self._local.conn.execute("PRAGMA foreign_keys=ON")
+            return self._local.conn
+
     @contextmanager
     def get_cursor(self):
         """Context manager ile cursor döndürür."""
         conn = self._get_conn()
-        cursor = conn.cursor()
+        if self._is_postgres:
+            import psycopg2.extras
+            raw_cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+        else:
+            raw_cur = conn.cursor()
+
+        cursor = _CursorProxy(raw_cur, self._is_postgres)
         try:
             yield cursor
             conn.commit()
         except Exception:
-            conn.rollback()
+            try:
+                conn.rollback()
+            except Exception:
+                self._local.conn = None
             raise
-    
+
     def _init_db(self):
-        """Tabloları oluşturur."""
-        conn = sqlite3.connect(self.db_path)
+        """Tabloları oluşturur (SQLite veya PostgreSQL)."""
+        if self._is_postgres:
+            import psycopg2
+            conn = psycopg2.connect(self._db_url)
+            auto_pk = "SERIAL PRIMARY KEY"
+        else:
+            conn = sqlite3.connect(self.db_path)
+            auto_pk = "INTEGER PRIMARY KEY AUTOINCREMENT"
+
         cursor = conn.cursor()
-        
+
         # Keys tablosu
-        cursor.execute("""
+        cursor.execute(f"""
             CREATE TABLE IF NOT EXISTS keys (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                id {auto_pk},
                 key TEXT UNIQUE NOT NULL,
                 plan TEXT NOT NULL CHECK(plan IN ('daily','weekly','monthly','lifetime')),
-                created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-                expires_at DATETIME,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                expires_at TIMESTAMP,
                 hwid TEXT,
-                is_active BOOLEAN DEFAULT 1,
-                activated_at DATETIME,
-                last_seen DATETIME,
+                is_active BOOLEAN DEFAULT TRUE,
+                activated_at TIMESTAMP,
+                last_seen TIMESTAMP,
                 last_ip TEXT,
                 note TEXT,
                 created_by TEXT DEFAULT 'admin'
             )
         """)
-        
+
         # Admin kullanıcılar
-        cursor.execute("""
+        cursor.execute(f"""
             CREATE TABLE IF NOT EXISTS admin_users (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                id {auto_pk},
                 username TEXT UNIQUE NOT NULL,
                 password_hash TEXT NOT NULL,
-                created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-                last_login DATETIME,
-                is_active BOOLEAN DEFAULT 1
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                last_login TIMESTAMP,
+                is_active BOOLEAN DEFAULT TRUE
             )
         """)
-        
+
         # Güvenlik olayları
-        cursor.execute("""
+        cursor.execute(f"""
             CREATE TABLE IF NOT EXISTS security_events (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                id {auto_pk},
                 hwid TEXT,
                 key_text TEXT,
                 event_type TEXT NOT NULL,
                 detail TEXT,
                 ip_address TEXT,
-                created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         """)
-        
+
         # Aktivite logları
-        cursor.execute("""
+        cursor.execute(f"""
             CREATE TABLE IF NOT EXISTS activity_logs (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                id {auto_pk},
                 key_text TEXT,
                 action TEXT NOT NULL,
                 detail TEXT,
                 ip_address TEXT,
-                created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         """)
-        
+
         # Token tablosu (dönen tokenlar)
-        cursor.execute("""
+        cursor.execute(f"""
             CREATE TABLE IF NOT EXISTS active_tokens (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                id {auto_pk},
                 key_text TEXT NOT NULL,
                 token TEXT UNIQUE NOT NULL,
                 hwid TEXT NOT NULL,
                 aes_key TEXT NOT NULL,
-                created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-                expires_at DATETIME NOT NULL,
-                is_valid BOOLEAN DEFAULT 1,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                expires_at TIMESTAMP NOT NULL,
+                is_valid BOOLEAN DEFAULT TRUE,
                 FOREIGN KEY (key_text) REFERENCES keys(key)
             )
         """)
-        
+
         # İndeksler
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_keys_key ON keys(key)")
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_keys_hwid ON keys(hwid)")
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_tokens_token ON active_tokens(token)")
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_tokens_key ON active_tokens(key_text)")
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_security_hwid ON security_events(hwid)")
-        
+
         conn.commit()
         conn.close()
 
