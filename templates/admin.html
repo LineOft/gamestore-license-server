@@ -1,0 +1,505 @@
+<!DOCTYPE html>
+<html lang="tr" data-bs-theme="dark">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>GameStore Admin Panel</title>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/css/bootstrap.min.css" rel="stylesheet">
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.1/font/bootstrap-icons.css" rel="stylesheet">
+    <style>
+        :root { --gs-accent: #8b5cf6; --gs-green: #22c55e; --gs-red: #ef4444; --gs-yellow: #eab308; --gs-blue: #3b82f6; }
+        body { background: #0f0f14; font-family: 'Segoe UI', sans-serif; }
+        .sidebar { width: 260px; min-height: 100vh; background: #16161d; border-right: 1px solid #2a2a35; position: fixed; }
+        .sidebar .brand { padding: 24px 20px; border-bottom: 1px solid #2a2a35; }
+        .sidebar .brand h5 { color: var(--gs-accent); margin: 0; font-weight: 700; }
+        .sidebar .nav-link { color: #9ca3af; padding: 12px 20px; border-left: 3px solid transparent; transition: all .2s; }
+        .sidebar .nav-link:hover, .sidebar .nav-link.active { background: #1e1e2a; color: #fff; border-left-color: var(--gs-accent); }
+        .sidebar .nav-link i { width: 24px; }
+        .main-content { margin-left: 260px; padding: 24px; }
+        .stat-card { background: #16161d; border: 1px solid #2a2a35; border-radius: 12px; padding: 20px; }
+        .stat-card .value { font-size: 2rem; font-weight: 700; }
+        .stat-card.green .value { color: var(--gs-green); }
+        .stat-card.blue .value { color: var(--gs-blue); }
+        .stat-card.yellow .value { color: var(--gs-yellow); }
+        .stat-card.red .value { color: var(--gs-red); }
+        .stat-card.purple .value { color: var(--gs-accent); }
+        .table-dark { --bs-table-bg: #16161d; --bs-table-border-color: #2a2a35; }
+        .badge-daily { background: var(--gs-blue); }
+        .badge-weekly { background: var(--gs-green); }
+        .badge-monthly { background: var(--gs-yellow); color: #000; }
+        .badge-lifetime { background: var(--gs-accent); }
+        .badge-active { background: var(--gs-green); }
+        .badge-expired { background: var(--gs-red); }
+        .badge-revoked { background: #6b7280; }
+        .key-text { font-family: 'Cascadia Code', 'Consolas', monospace; letter-spacing: 1px; }
+        .btn-accent { background: var(--gs-accent); border: none; color: #fff; }
+        .btn-accent:hover { background: #7c3aed; color: #fff; }
+        .login-container { max-width: 400px; margin: 100px auto; }
+        .page { display: none; }
+        .page.active { display: block; }
+        .copy-btn { cursor: pointer; opacity: .6; transition: opacity .2s; }
+        .copy-btn:hover { opacity: 1; }
+        .toast-container { position: fixed; top: 20px; right: 20px; z-index: 9999; }
+    </style>
+</head>
+<body>
+
+<!-- LOGIN EKRANI -->
+<div id="loginPage" class="page active">
+    <div class="login-container">
+        <div class="card bg-dark border-secondary">
+            <div class="card-body p-4">
+                <div class="text-center mb-4">
+                    <h3 class="text-white">⬡ GameStore</h3>
+                    <p class="text-secondary">Admin Panel</p>
+                </div>
+                <div id="loginError" class="alert alert-danger d-none"></div>
+                <div class="mb-3">
+                    <label class="form-label text-secondary">Kullanıcı Adı</label>
+                    <input type="text" id="loginUsername" class="form-control bg-dark text-white border-secondary" placeholder="admin">
+                </div>
+                <div class="mb-3">
+                    <label class="form-label text-secondary">Şifre</label>
+                    <input type="password" id="loginPassword" class="form-control bg-dark text-white border-secondary" placeholder="••••••••">
+                </div>
+                <button onclick="doLogin()" class="btn btn-accent w-100">Giriş Yap</button>
+                <hr class="border-secondary">
+                <div id="setupSection">
+                    <p class="text-secondary small">İlk kurulum? Admin hesabı oluşturun:</p>
+                    <button onclick="doSetup()" class="btn btn-outline-secondary btn-sm w-100">İlk Admin Oluştur</button>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- ANA PANEL -->
+<div id="mainPanel" class="page">
+    <!-- Sidebar -->
+    <div class="sidebar">
+        <div class="brand">
+            <h5>⬡ GameStore</h5>
+            <small class="text-secondary">Admin Panel v1.0</small>
+        </div>
+        <nav class="nav flex-column mt-3">
+            <a class="nav-link active" onclick="showSection('dashboard')" href="#"><i class="bi bi-grid-fill"></i> Dashboard</a>
+            <a class="nav-link" onclick="showSection('keys')" href="#"><i class="bi bi-key-fill"></i> Key Yönetimi</a>
+            <a class="nav-link" onclick="showSection('generate')" href="#"><i class="bi bi-plus-circle-fill"></i> Key Üret</a>
+            <a class="nav-link" onclick="showSection('security')" href="#"><i class="bi bi-shield-fill-exclamation"></i> Güvenlik</a>
+            <a class="nav-link" onclick="showSection('activity')" href="#"><i class="bi bi-clock-history"></i> Aktivite</a>
+        </nav>
+        <div class="position-absolute bottom-0 w-100 p-3 border-top border-secondary">
+            <div class="d-flex align-items-center justify-content-between">
+                <small class="text-secondary" id="adminUsername">admin</small>
+                <button onclick="doLogout()" class="btn btn-sm btn-outline-danger">Çıkış</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Main Content -->
+    <div class="main-content">
+        <!-- DASHBOARD -->
+        <div id="sec-dashboard" class="section active">
+            <h4 class="text-white mb-4">📊 Dashboard</h4>
+            <div class="row g-3 mb-4">
+                <div class="col-md-3"><div class="stat-card purple"><div class="text-secondary small">Toplam Key</div><div class="value" id="statTotal">0</div></div></div>
+                <div class="col-md-3"><div class="stat-card green"><div class="text-secondary small">Aktif Key</div><div class="value" id="statActive">0</div></div></div>
+                <div class="col-md-3"><div class="stat-card blue"><div class="text-secondary small">Aktive Edilmiş</div><div class="value" id="statActivated">0</div></div></div>
+                <div class="col-md-3"><div class="stat-card yellow"><div class="text-secondary small">Online Şimdi</div><div class="value" id="statOnline">0</div></div></div>
+            </div>
+            <div class="row g-3 mb-4">
+                <div class="col-md-3"><div class="stat-card red"><div class="text-secondary small">Süresi Dolmuş</div><div class="value" id="statExpired">0</div></div></div>
+                <div class="col-md-3"><div class="stat-card"><div class="text-secondary small">İptal Edilmiş</div><div class="value text-secondary" id="statRevoked">0</div></div></div>
+                <div class="col-md-3"><div class="stat-card green"><div class="text-secondary small">Bu Ay Aktivasyon</div><div class="value" id="statMonthly">0</div></div></div>
+                <div class="col-md-3"><div class="stat-card blue"><div class="text-secondary small">Plan Dağılımı</div><div id="statPlans" class="mt-1"></div></div></div>
+            </div>
+        </div>
+
+        <!-- KEY YÖNETİMİ -->
+        <div id="sec-keys" class="section" style="display:none">
+            <div class="d-flex justify-content-between align-items-center mb-4">
+                <h4 class="text-white mb-0">🔑 Key Yönetimi</h4>
+                <div>
+                    <select id="keyFilter" class="form-select form-select-sm bg-dark text-white border-secondary d-inline-block w-auto" onchange="loadKeys()">
+                        <option value="">Tümü</option>
+                        <option value="active">Aktif</option>
+                        <option value="expired">Süresi Dolmuş</option>
+                        <option value="revoked">İptal Edilmiş</option>
+                    </select>
+                </div>
+            </div>
+            <div class="table-responsive">
+                <table class="table table-dark table-hover">
+                    <thead>
+                        <tr><th>Key</th><th>Plan</th><th>Durum</th><th>HWID</th><th>Oluşturma</th><th>Son Görülme</th><th>İşlem</th></tr>
+                    </thead>
+                    <tbody id="keysTable"></tbody>
+                </table>
+            </div>
+        </div>
+
+        <!-- KEY ÜRET -->
+        <div id="sec-generate" class="section" style="display:none">
+            <h4 class="text-white mb-4">➕ Key Üret</h4>
+            <div class="card bg-dark border-secondary" style="max-width: 500px;">
+                <div class="card-body">
+                    <div class="mb-3">
+                        <label class="form-label text-secondary">Plan</label>
+                        <select id="genPlan" class="form-select bg-dark text-white border-secondary">
+                            <option value="daily">Günlük (1 gün)</option>
+                            <option value="weekly">Haftalık (7 gün)</option>
+                            <option value="monthly" selected>Aylık (30 gün)</option>
+                            <option value="lifetime">Ömürlük</option>
+                        </select>
+                    </div>
+                    <div class="mb-3">
+                        <label class="form-label text-secondary">Adet</label>
+                        <input type="number" id="genCount" class="form-control bg-dark text-white border-secondary" value="1" min="1" max="100">
+                    </div>
+                    <div class="mb-3">
+                        <label class="form-label text-secondary">Not (opsiyonel)</label>
+                        <input type="text" id="genNote" class="form-control bg-dark text-white border-secondary" placeholder="Satış notu...">
+                    </div>
+                    <button onclick="generateKeys()" class="btn btn-accent w-100">
+                        <i class="bi bi-plus-circle"></i> Key Üret
+                    </button>
+                </div>
+            </div>
+            <div id="generatedKeys" class="mt-4" style="display:none">
+                <h5 class="text-white">Üretilen Keyler</h5>
+                <div id="generatedList" class="bg-dark border border-secondary rounded p-3"></div>
+                <button onclick="copyAllKeys()" class="btn btn-outline-secondary btn-sm mt-2">
+                    <i class="bi bi-clipboard"></i> Tümünü Kopyala
+                </button>
+            </div>
+        </div>
+
+        <!-- GÜVENLİK -->
+        <div id="sec-security" class="section" style="display:none">
+            <h4 class="text-white mb-4">🛡️ Güvenlik Olayları</h4>
+            <div class="table-responsive">
+                <table class="table table-dark table-hover">
+                    <thead>
+                        <tr><th>Tarih</th><th>Tip</th><th>HWID</th><th>Key</th><th>Detay</th><th>IP</th></tr>
+                    </thead>
+                    <tbody id="securityTable"></tbody>
+                </table>
+            </div>
+        </div>
+
+        <!-- AKTİVİTE -->
+        <div id="sec-activity" class="section" style="display:none">
+            <h4 class="text-white mb-4">📋 Aktivite Logları</h4>
+            <div class="table-responsive">
+                <table class="table table-dark table-hover">
+                    <thead>
+                        <tr><th>Tarih</th><th>Key</th><th>İşlem</th><th>Detay</th><th>IP</th></tr>
+                    </thead>
+                    <tbody id="activityTable"></tbody>
+                </table>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Toast -->
+<div class="toast-container" id="toastContainer"></div>
+
+<script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/js/bootstrap.bundle.min.js"></script>
+<script>
+// ============================================================
+// CONFIG
+// ============================================================
+const API_BASE = window.location.origin;
+let AUTH_TOKEN = localStorage.getItem('gs_admin_token') || '';
+let ADMIN_USER = localStorage.getItem('gs_admin_user') || '';
+
+// ============================================================
+// HELPERS
+// ============================================================
+function api(method, endpoint, body = null) {
+    const opts = {
+        method: method,
+        headers: { 'Content-Type': 'application/json' }
+    };
+    if (AUTH_TOKEN) opts.headers['Authorization'] = `Bearer ${AUTH_TOKEN}`;
+    if (body) opts.body = JSON.stringify(body);
+    return fetch(`${API_BASE}${endpoint}`, opts).then(r => {
+        if (r.status === 401) { doLogout(); throw new Error('Oturum süresi doldu'); }
+        return r.json();
+    });
+}
+
+function showToast(msg, type = 'success') {
+    const id = 'toast_' + Date.now();
+    const color = type === 'success' ? 'bg-success' : type === 'error' ? 'bg-danger' : 'bg-warning';
+    const html = `<div id="${id}" class="toast show ${color} text-white" role="alert">
+        <div class="toast-body d-flex justify-content-between align-items-center">
+            <span>${msg}</span>
+            <button type="button" class="btn-close btn-close-white ms-2" onclick="this.closest('.toast').remove()"></button>
+        </div>
+    </div>`;
+    document.getElementById('toastContainer').insertAdjacentHTML('beforeend', html);
+    setTimeout(() => { const el = document.getElementById(id); if (el) el.remove(); }, 4000);
+}
+
+function formatDate(d) {
+    if (!d) return '-';
+    return new Date(d).toLocaleString('tr-TR');
+}
+
+function getStatusBadge(key) {
+    if (!key.is_active) return '<span class="badge badge-revoked">İptal</span>';
+    if (key.expires_at && new Date(key.expires_at) < new Date()) return '<span class="badge badge-expired">Süresi Dolmuş</span>';
+    if (key.hwid) return '<span class="badge badge-active">Aktif</span>';
+    return '<span class="badge bg-info">Kullanılmamış</span>';
+}
+
+function getPlanBadge(plan) {
+    const labels = { daily: 'Günlük', weekly: 'Haftalık', monthly: 'Aylık', lifetime: 'Ömürlük' };
+    return `<span class="badge badge-${plan}">${labels[plan] || plan}</span>`;
+}
+
+// ============================================================
+// AUTH
+// ============================================================
+function doLogin() {
+    const u = document.getElementById('loginUsername').value;
+    const p = document.getElementById('loginPassword').value;
+    if (!u || !p) return;
+    
+    api('POST', '/api/admin/login', { username: u, password: p })
+        .then(data => {
+            if (data.success) {
+                AUTH_TOKEN = data.token;
+                ADMIN_USER = data.username;
+                localStorage.setItem('gs_admin_token', AUTH_TOKEN);
+                localStorage.setItem('gs_admin_user', ADMIN_USER);
+                showMainPanel();
+            } else {
+                document.getElementById('loginError').textContent = data.detail || 'Giriş başarısız';
+                document.getElementById('loginError').classList.remove('d-none');
+            }
+        })
+        .catch(err => {
+            document.getElementById('loginError').textContent = err.message || 'Bağlantı hatası';
+            document.getElementById('loginError').classList.remove('d-none');
+        });
+}
+
+function doSetup() {
+    const u = document.getElementById('loginUsername').value || 'admin';
+    const p = document.getElementById('loginPassword').value;
+    if (!p) { showToast('Şifre girin', 'error'); return; }
+    
+    api('POST', '/api/admin/setup', { username: u, password: p })
+        .then(data => {
+            if (data.success) {
+                showToast('Admin hesabı oluşturuldu! Şimdi giriş yapın.');
+                document.getElementById('setupSection').style.display = 'none';
+            } else {
+                showToast(data.detail || 'Hata', 'error');
+            }
+        })
+        .catch(err => showToast(err.message, 'error'));
+}
+
+function doLogout() {
+    AUTH_TOKEN = '';
+    ADMIN_USER = '';
+    localStorage.removeItem('gs_admin_token');
+    localStorage.removeItem('gs_admin_user');
+    document.getElementById('loginPage').classList.add('active');
+    document.getElementById('mainPanel').classList.remove('active');
+    document.getElementById('mainPanel').style.display = 'none';
+    document.getElementById('loginPage').style.display = 'block';
+}
+
+function showMainPanel() {
+    document.getElementById('loginPage').style.display = 'none';
+    document.getElementById('mainPanel').style.display = 'block';
+    document.getElementById('adminUsername').textContent = ADMIN_USER;
+    loadDashboard();
+}
+
+// ============================================================
+// NAVIGATION
+// ============================================================
+function showSection(name) {
+    document.querySelectorAll('.section').forEach(s => s.style.display = 'none');
+    document.querySelectorAll('.sidebar .nav-link').forEach(l => l.classList.remove('active'));
+    document.getElementById('sec-' + name).style.display = 'block';
+    event.target.closest('.nav-link').classList.add('active');
+    
+    if (name === 'dashboard') loadDashboard();
+    else if (name === 'keys') loadKeys();
+    else if (name === 'security') loadSecurity();
+    else if (name === 'activity') loadActivity();
+}
+
+// ============================================================
+// DASHBOARD
+// ============================================================
+function loadDashboard() {
+    api('GET', '/api/admin/stats')
+        .then(data => {
+            const s = data.stats;
+            document.getElementById('statTotal').textContent = s.total_keys || 0;
+            document.getElementById('statActive').textContent = s.active_keys || 0;
+            document.getElementById('statActivated').textContent = s.activated_keys || 0;
+            document.getElementById('statOnline').textContent = s.online_users || 0;
+            document.getElementById('statExpired').textContent = s.expired_keys || 0;
+            document.getElementById('statRevoked').textContent = s.revoked_keys || 0;
+            document.getElementById('statMonthly').textContent = s.monthly_activations || 0;
+            
+            const plans = s.plan_distribution || {};
+            let html = '';
+            for (const [plan, count] of Object.entries(plans)) {
+                html += `${getPlanBadge(plan)} <small class="text-white">${count}</small> `;
+            }
+            document.getElementById('statPlans').innerHTML = html || '<small class="text-secondary">Veri yok</small>';
+        })
+        .catch(err => showToast('Dashboard yüklenemedi', 'error'));
+}
+
+// ============================================================
+// KEY YÖNETİMİ
+// ============================================================
+function loadKeys() {
+    const filter = document.getElementById('keyFilter')?.value || '';
+    const query = filter ? `?status=${filter}` : '';
+    
+    api('GET', `/api/admin/keys${query}`)
+        .then(data => {
+            const tbody = document.getElementById('keysTable');
+            tbody.innerHTML = '';
+            
+            (data.keys || []).forEach(k => {
+                tbody.innerHTML += `<tr>
+                    <td><span class="key-text">${k.key}</span> 
+                        <i class="bi bi-clipboard copy-btn" onclick="copyKey('${k.key}')"></i></td>
+                    <td>${getPlanBadge(k.plan)}</td>
+                    <td>${getStatusBadge(k)}</td>
+                    <td><small class="text-secondary">${k.hwid || '-'}</small></td>
+                    <td><small>${formatDate(k.created_at)}</small></td>
+                    <td><small>${formatDate(k.last_seen)}</small></td>
+                    <td>
+                        ${k.is_active ? `<button class="btn btn-sm btn-outline-danger" onclick="revokeKey('${k.key}')">İptal</button>` : ''}
+                        ${k.hwid ? `<button class="btn btn-sm btn-outline-warning ms-1" onclick="resetHwid('${k.key}')">HWID Reset</button>` : ''}
+                    </td>
+                </tr>`;
+            });
+            
+            if (!data.keys?.length) {
+                tbody.innerHTML = '<tr><td colspan="7" class="text-center text-secondary">Key bulunamadı</td></tr>';
+            }
+        })
+        .catch(err => showToast('Keyler yüklenemedi', 'error'));
+}
+
+function copyKey(key) {
+    navigator.clipboard.writeText(key).then(() => showToast('Key kopyalandı!'));
+}
+
+function revokeKey(key) {
+    if (!confirm(`${key} iptal edilecek. Emin misiniz?`)) return;
+    api('POST', '/api/admin/revoke', { key: key, reason: 'Admin tarafından iptal' })
+        .then(data => { showToast('Key iptal edildi'); loadKeys(); })
+        .catch(err => showToast('Hata: ' + err.message, 'error'));
+}
+
+function resetHwid(key) {
+    if (!confirm(`${key} HWID sıfırlanacak. Emin misiniz?`)) return;
+    api('POST', '/api/admin/reset-hwid', { key: key })
+        .then(data => { showToast('HWID sıfırlandı'); loadKeys(); })
+        .catch(err => showToast('Hata: ' + err.message, 'error'));
+}
+
+// ============================================================
+// KEY ÜRETME
+// ============================================================
+let lastGeneratedKeys = [];
+
+function generateKeys() {
+    const plan = document.getElementById('genPlan').value;
+    const count = parseInt(document.getElementById('genCount').value) || 1;
+    const note = document.getElementById('genNote').value;
+    
+    api('POST', '/api/admin/generate', { plan, count, note })
+        .then(data => {
+            if (data.success) {
+                lastGeneratedKeys = data.keys;
+                const listEl = document.getElementById('generatedList');
+                listEl.innerHTML = data.keys.map(k => 
+                    `<div class="d-flex justify-content-between align-items-center mb-1">
+                        <span class="key-text text-white">${k}</span>
+                        <i class="bi bi-clipboard copy-btn text-secondary" onclick="copyKey('${k}')"></i>
+                    </div>`
+                ).join('');
+                document.getElementById('generatedKeys').style.display = 'block';
+                showToast(`${data.count} key üretildi!`);
+            }
+        })
+        .catch(err => showToast('Key üretilemedi', 'error'));
+}
+
+function copyAllKeys() {
+    navigator.clipboard.writeText(lastGeneratedKeys.join('\n')).then(() => showToast('Tüm keyler kopyalandı!'));
+}
+
+// ============================================================
+// GÜVENLİK & AKTİVİTE
+// ============================================================
+function loadSecurity() {
+    api('GET', '/api/admin/security-events')
+        .then(data => {
+            const tbody = document.getElementById('securityTable');
+            tbody.innerHTML = '';
+            (data.events || []).forEach(e => {
+                tbody.innerHTML += `<tr>
+                    <td><small>${formatDate(e.created_at)}</small></td>
+                    <td><span class="badge bg-danger">${e.event_type}</span></td>
+                    <td><small class="text-secondary">${e.hwid || '-'}</small></td>
+                    <td><small class="key-text">${e.key_text || '-'}</small></td>
+                    <td><small>${e.detail || '-'}</small></td>
+                    <td><small>${e.ip_address || '-'}</small></td>
+                </tr>`;
+            });
+            if (!data.events?.length) tbody.innerHTML = '<tr><td colspan="6" class="text-center text-secondary">Güvenlik olayı yok</td></tr>';
+        });
+}
+
+function loadActivity() {
+    api('GET', '/api/admin/activity')
+        .then(data => {
+            const tbody = document.getElementById('activityTable');
+            tbody.innerHTML = '';
+            (data.logs || []).forEach(l => {
+                tbody.innerHTML += `<tr>
+                    <td><small>${formatDate(l.created_at)}</small></td>
+                    <td><small class="key-text">${l.key_text || '-'}</small></td>
+                    <td><span class="badge bg-secondary">${l.action}</span></td>
+                    <td><small>${l.detail || '-'}</small></td>
+                    <td><small>${l.ip_address || '-'}</small></td>
+                </tr>`;
+            });
+            if (!data.logs?.length) tbody.innerHTML = '<tr><td colspan="5" class="text-center text-secondary">Aktivite yok</td></tr>';
+        });
+}
+
+// ============================================================
+// AUTO-LOGIN CHECK
+// ============================================================
+if (AUTH_TOKEN) {
+    api('GET', '/api/admin/stats')
+        .then(data => { if (data.stats) showMainPanel(); else doLogout(); })
+        .catch(() => doLogout());
+}
+
+// Enter tuşu ile giriş
+document.addEventListener('keypress', (e) => {
+    if (e.key === 'Enter' && document.getElementById('loginPage').style.display !== 'none') doLogin();
+});
+</script>
+</body>
+</html>

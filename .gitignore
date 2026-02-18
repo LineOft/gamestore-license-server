@@ -1,0 +1,28 @@
+# Byte-compiled
+__pycache__/
+*.py[cod]
+*.pyc
+
+# Virtual env
+.venv/
+venv/
+env/
+
+# Database (her deploy'da yeniden oluşturulur)
+# NOT: Render'da persistent disk kullanılıyorsa bu satırı kaldırın
+# license.db
+# license.db-shm
+# license.db-wal
+
+# Env files (secrets Render dashboard'dan girilir)
+.env
+.env.production
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.idea/
+.vscode/
+*.swp

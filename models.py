@@ -1,0 +1,545 @@
+"""
+models.py — Veritabanı Modelleri ve İşlemleri
+================================================
+SQLite tabanlı lisans veritabanı.
+Tablolar: keys, admin_users, security_events, activity_logs
+
+Son Güncelleme: 2026-02-18
+"""
+
+import sqlite3
+import os
+import uuid
+import string
+import random
+import threading
+from datetime import datetime, timedelta
+from typing import Optional, List, Dict, Any
+from pathlib import Path
+from contextlib import contextmanager
+
+# Veritabanı dosya yolu
+DB_DIR = Path(__file__).parent
+DB_PATH = DB_DIR / "license.db"
+
+
+# ============================================================
+# DATABASE BAĞLANTI YÖNETİCİSİ
+# ============================================================
+
+class Database:
+    """Thread-safe SQLite bağlantı yöneticisi."""
+    
+    _local = threading.local()
+    
+    def __init__(self, db_path: str = None):
+        self.db_path = db_path or str(DB_PATH)
+        self._init_db()
+    
+    def _get_conn(self) -> sqlite3.Connection:
+        """Thread-local bağlantı döndürür."""
+        if not hasattr(self._local, 'conn') or self._local.conn is None:
+            self._local.conn = sqlite3.connect(self.db_path)
+            self._local.conn.row_factory = sqlite3.Row
+            self._local.conn.execute("PRAGMA journal_mode=WAL")
+            self._local.conn.execute("PRAGMA foreign_keys=ON")
+        return self._local.conn
+    
+    @contextmanager
+    def get_cursor(self):
+        """Context manager ile cursor döndürür."""
+        conn = self._get_conn()
+        cursor = conn.cursor()
+        try:
+            yield cursor
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+    
+    def _init_db(self):
+        """Tabloları oluşturur."""
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        
+        # Keys tablosu
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS keys (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                key TEXT UNIQUE NOT NULL,
+                plan TEXT NOT NULL CHECK(plan IN ('daily','weekly','monthly','lifetime')),
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                expires_at DATETIME,
+                hwid TEXT,
+                is_active BOOLEAN DEFAULT 1,
+                activated_at DATETIME,
+                last_seen DATETIME,
+                last_ip TEXT,
+                note TEXT,
+                created_by TEXT DEFAULT 'admin'
+            )
+        """)
+        
+        # Admin kullanıcılar
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS admin_users (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                username TEXT UNIQUE NOT NULL,
+                password_hash TEXT NOT NULL,
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                last_login DATETIME,
+                is_active BOOLEAN DEFAULT 1
+            )
+        """)
+        
+        # Güvenlik olayları
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS security_events (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                hwid TEXT,
+                key_text TEXT,
+                event_type TEXT NOT NULL,
+                detail TEXT,
+                ip_address TEXT,
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+        
+        # Aktivite logları
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS activity_logs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                key_text TEXT,
+                action TEXT NOT NULL,
+                detail TEXT,
+                ip_address TEXT,
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+        
+        # Token tablosu (dönen tokenlar)
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS active_tokens (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                key_text TEXT NOT NULL,
+                token TEXT UNIQUE NOT NULL,
+                hwid TEXT NOT NULL,
+                aes_key TEXT NOT NULL,
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                expires_at DATETIME NOT NULL,
+                is_valid BOOLEAN DEFAULT 1,
+                FOREIGN KEY (key_text) REFERENCES keys(key)
+            )
+        """)
+        
+        # İndeksler
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_keys_key ON keys(key)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_keys_hwid ON keys(hwid)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_tokens_token ON active_tokens(token)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_tokens_key ON active_tokens(key_text)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_security_hwid ON security_events(hwid)")
+        
+        conn.commit()
+        conn.close()
+
+
+# ============================================================
+# KEY İŞLEMLERİ
+# ============================================================
+
+class KeyManager:
+    """Lisans anahtarı CRUD işlemleri."""
+    
+    # Plan süreleri
+    PLAN_DURATIONS = {
+        'daily': timedelta(days=1),
+        'weekly': timedelta(weeks=1),
+        'monthly': timedelta(days=30),
+        'lifetime': timedelta(days=36500),  # 100 yıl
+    }
+    
+    def __init__(self, db: Database):
+        self.db = db
+    
+    @staticmethod
+    def _generate_key() -> str:
+        """XXXX-XXXX-XXXX-XXXX formatında benzersiz key üretir."""
+        chars = string.ascii_uppercase + string.digits
+        # İlk kısmı UUID'den türet (tahmin edilemezlik)
+        uid = uuid.uuid4().hex.upper()
+        parts = []
+        for i in range(4):
+            # UUID karakterleri + random karışımı
+            segment = ""
+            for j in range(4):
+                idx = (i * 4 + j) % len(uid)
+                if random.random() > 0.5:
+                    segment += uid[idx]
+                else:
+                    segment += random.choice(chars)
+            parts.append(segment)
+        return '-'.join(parts)
+    
+    def generate_keys(self, plan: str, count: int = 1, 
+                      note: str = None, created_by: str = "admin") -> List[str]:
+        """
+        Yeni lisans anahtarları üretir.
+        
+        Args:
+            plan: 'daily', 'weekly', 'monthly', 'lifetime'
+            count: Üretilecek key sayısı
+            note: Admin notu
+            created_by: Oluşturan admin
+        
+        Returns:
+            Üretilen key listesi
+        """
+        if plan not in self.PLAN_DURATIONS:
+            raise ValueError(f"Geçersiz plan: {plan}")
+        
+        keys = []
+        with self.db.get_cursor() as cursor:
+            for _ in range(count):
+                # Benzersiz key üret
+                while True:
+                    key = self._generate_key()
+                    cursor.execute("SELECT 1 FROM keys WHERE key=?", (key,))
+                    if not cursor.fetchone():
+                        break
+                
+                cursor.execute("""
+                    INSERT INTO keys (key, plan, note, created_by)
+                    VALUES (?, ?, ?, ?)
+                """, (key, plan, note, created_by))
+                keys.append(key)
+        
+        return keys
+    
+    def verify_key(self, key: str, hwid: str, ip: str = None) -> Dict[str, Any]:
+        """
+        Key + HWID doğrulama.
+        
+        Returns:
+            {"valid": bool, "reason": str, "plan": str, "expires_at": str}
+        """
+        with self.db.get_cursor() as cursor:
+            cursor.execute("SELECT * FROM keys WHERE key=?", (key,))
+            record = cursor.fetchone()
+            
+            if not record:
+                self._log_activity(cursor, key, "verify_failed", "KEY_NOT_FOUND", ip)
+                return {"valid": False, "reason": "KEY_NOT_FOUND"}
+            
+            if not record["is_active"]:
+                self._log_activity(cursor, key, "verify_failed", "KEY_REVOKED", ip)
+                return {"valid": False, "reason": "KEY_REVOKED"}
+            
+            # Süre kontrolü
+            if record["expires_at"]:
+                expires = datetime.fromisoformat(record["expires_at"])
+                if expires < datetime.now():
+                    self._log_activity(cursor, key, "verify_failed", "KEY_EXPIRED", ip)
+                    return {"valid": False, "reason": "KEY_EXPIRED"}
+            
+            # HWID kontrolü
+            if record["hwid"] and record["hwid"] != hwid:
+                self._log_security(cursor, hwid, key, "HWID_MISMATCH",
+                                   f"Kayıtlı: {record['hwid'][:8]}..., Gelen: {hwid[:8]}...", ip)
+                return {"valid": False, "reason": "HWID_MISMATCH"}
+            
+            # İlk aktivasyon → HWID kaydet + süre başlat
+            if not record["hwid"]:
+                now = datetime.now()
+                duration = self.PLAN_DURATIONS[record["plan"]]
+                expires_at = now + duration
+                
+                cursor.execute("""
+                    UPDATE keys SET hwid=?, activated_at=?, expires_at=?, 
+                                    last_seen=?, last_ip=?
+                    WHERE key=?
+                """, (hwid, now.isoformat(), expires_at.isoformat(),
+                      now.isoformat(), ip, key))
+                
+                self._log_activity(cursor, key, "activated",
+                                   f"HWID={hwid[:8]}..., Plan={record['plan']}", ip)
+                
+                return {
+                    "valid": True,
+                    "plan": record["plan"],
+                    "expires_at": expires_at.isoformat(),
+                    "first_activation": True
+                }
+            
+            # Mevcut key — last_seen güncelle
+            cursor.execute("""
+                UPDATE keys SET last_seen=?, last_ip=? WHERE key=?
+            """, (datetime.now().isoformat(), ip, key))
+            
+            self._log_activity(cursor, key, "verified", f"HWID={hwid[:8]}...", ip)
+            
+            return {
+                "valid": True,
+                "plan": record["plan"],
+                "expires_at": record["expires_at"],
+                "first_activation": False
+            }
+    
+    def revoke_key(self, key: str, reason: str = None) -> bool:
+        """Key'i iptal eder."""
+        with self.db.get_cursor() as cursor:
+            cursor.execute("UPDATE keys SET is_active=0 WHERE key=?", (key,))
+            if cursor.rowcount > 0:
+                self._log_activity(cursor, key, "revoked", reason)
+                # İlgili tokenları da iptal et
+                cursor.execute("UPDATE active_tokens SET is_valid=0 WHERE key_text=?", (key,))
+                return True
+            return False
+    
+    def reset_hwid(self, key: str) -> bool:
+        """Key'in HWID'sini sıfırlar (müşteri cihaz değişikliği)."""
+        with self.db.get_cursor() as cursor:
+            cursor.execute("""
+                UPDATE keys SET hwid=NULL, activated_at=NULL, expires_at=NULL 
+                WHERE key=?
+            """, (key,))
+            if cursor.rowcount > 0:
+                self._log_activity(cursor, key, "hwid_reset", "Admin tarafından sıfırlandı")
+                cursor.execute("UPDATE active_tokens SET is_valid=0 WHERE key_text=?", (key,))
+                return True
+            return False
+    
+    def get_all_keys(self, status_filter: str = None) -> List[Dict]:
+        """Tüm keyleri listeler."""
+        with self.db.get_cursor() as cursor:
+            query = "SELECT * FROM keys ORDER BY created_at DESC"
+            params = []
+            
+            if status_filter == "active":
+                query = "SELECT * FROM keys WHERE is_active=1 AND (expires_at IS NULL OR expires_at > ?) ORDER BY created_at DESC"
+                params = [datetime.now().isoformat()]
+            elif status_filter == "expired":
+                query = "SELECT * FROM keys WHERE expires_at IS NOT NULL AND expires_at <= ? ORDER BY created_at DESC"
+                params = [datetime.now().isoformat()]
+            elif status_filter == "revoked":
+                query = "SELECT * FROM keys WHERE is_active=0 ORDER BY created_at DESC"
+                params = []
+            
+            cursor.execute(query, params)
+            return [dict(row) for row in cursor.fetchall()]
+    
+    def get_key_info(self, key: str) -> Optional[Dict]:
+        """Tek key bilgisi."""
+        with self.db.get_cursor() as cursor:
+            cursor.execute("SELECT * FROM keys WHERE key=?", (key,))
+            row = cursor.fetchone()
+            return dict(row) if row else None
+    
+    def get_stats(self) -> Dict:
+        """İstatistikler."""
+        with self.db.get_cursor() as cursor:
+            stats = {}
+            
+            cursor.execute("SELECT COUNT(*) as c FROM keys")
+            stats["total_keys"] = cursor.fetchone()["c"]
+            
+            cursor.execute("SELECT COUNT(*) as c FROM keys WHERE is_active=1")
+            stats["active_keys"] = cursor.fetchone()["c"]
+            
+            cursor.execute("SELECT COUNT(*) as c FROM keys WHERE hwid IS NOT NULL")
+            stats["activated_keys"] = cursor.fetchone()["c"]
+            
+            cursor.execute("SELECT COUNT(*) as c FROM keys WHERE is_active=0")
+            stats["revoked_keys"] = cursor.fetchone()["c"]
+            
+            now = datetime.now().isoformat()
+            cursor.execute("SELECT COUNT(*) as c FROM keys WHERE expires_at IS NOT NULL AND expires_at <= ?", (now,))
+            stats["expired_keys"] = cursor.fetchone()["c"]
+            
+            # Bu ay aktivasyonlar
+            month_start = datetime.now().replace(day=1, hour=0, minute=0, second=0).isoformat()
+            cursor.execute("SELECT COUNT(*) as c FROM keys WHERE activated_at >= ?", (month_start,))
+            stats["monthly_activations"] = cursor.fetchone()["c"]
+            
+            # Plan dağılımı
+            cursor.execute("SELECT plan, COUNT(*) as c FROM keys GROUP BY plan")
+            stats["plan_distribution"] = {row["plan"]: row["c"] for row in cursor.fetchall()}
+            
+            # Online kullanıcılar (son 10 dk)
+            recent = (datetime.now() - timedelta(minutes=10)).isoformat()
+            cursor.execute("SELECT COUNT(*) as c FROM keys WHERE last_seen >= ?", (recent,))
+            stats["online_users"] = cursor.fetchone()["c"]
+            
+            return stats
+    
+    def _log_activity(self, cursor, key, action, detail=None, ip=None):
+        cursor.execute("""
+            INSERT INTO activity_logs (key_text, action, detail, ip_address)
+            VALUES (?, ?, ?, ?)
+        """, (key, action, detail, ip))
+    
+    def _log_security(self, cursor, hwid, key, event_type, detail=None, ip=None):
+        cursor.execute("""
+            INSERT INTO security_events (hwid, key_text, event_type, detail, ip_address)
+            VALUES (?, ?, ?, ?, ?)
+        """, (hwid, key, event_type, detail, ip))
+
+
+# ============================================================
+# TOKEN İŞLEMLERİ
+# ============================================================
+
+class TokenStore:
+    """Dönen token veritabanı işlemleri."""
+    
+    TOKEN_LIFETIME = 300  # 5 dakika
+    
+    def __init__(self, db: Database):
+        self.db = db
+    
+    def create_token(self, key: str, hwid: str, aes_key: str,
+                     lifetime: int = None) -> str:
+        """Yeni token oluşturur ve eski tokenları iptal eder."""
+        token = uuid.uuid4().hex + uuid.uuid4().hex  # 64 char token
+        expires = datetime.now() + timedelta(seconds=lifetime or self.TOKEN_LIFETIME)
+        
+        with self.db.get_cursor() as cursor:
+            # Bu key+hwid için eski tokenları iptal et
+            cursor.execute("""
+                UPDATE active_tokens SET is_valid=0 
+                WHERE key_text=? AND hwid=?
+            """, (key, hwid))
+            
+            # Yeni token oluştur
+            cursor.execute("""
+                INSERT INTO active_tokens (key_text, token, hwid, aes_key, expires_at)
+                VALUES (?, ?, ?, ?, ?)
+            """, (key, token, hwid, aes_key, expires.isoformat()))
+        
+        return token
+    
+    def validate_token(self, token: str, hwid: str) -> Optional[Dict]:
+        """Token geçerli mi kontrol eder."""
+        with self.db.get_cursor() as cursor:
+            cursor.execute("""
+                SELECT t.*, k.plan, k.is_active as key_active
+                FROM active_tokens t
+                JOIN keys k ON t.key_text = k.key
+                WHERE t.token=? AND t.hwid=? AND t.is_valid=1
+            """, (token, hwid))
+            
+            row = cursor.fetchone()
+            if not row:
+                return None
+            
+            # Süre kontrolü
+            expires = datetime.fromisoformat(row["expires_at"])
+            if expires < datetime.now():
+                cursor.execute("UPDATE active_tokens SET is_valid=0 WHERE token=?", (token,))
+                return None
+            
+            # Key hala aktif mi?
+            if not row["key_active"]:
+                cursor.execute("UPDATE active_tokens SET is_valid=0 WHERE token=?", (token,))
+                return None
+            
+            return dict(row)
+    
+    def refresh_token(self, old_token: str, hwid: str, 
+                      new_aes_key: str, lifetime: int = None) -> Optional[str]:
+        """Eski token → yeni token. Eski iptal olur."""
+        token_data = self.validate_token(old_token, hwid)
+        if not token_data:
+            return None
+        
+        # Eski tokeni iptal et
+        with self.db.get_cursor() as cursor:
+            cursor.execute("UPDATE active_tokens SET is_valid=0 WHERE token=?", (old_token,))
+        
+        # Yeni token oluştur
+        return self.create_token(token_data["key_text"], hwid, new_aes_key, lifetime)
+    
+    def invalidate_key_tokens(self, key: str):
+        """Bir key'e ait tüm tokenları iptal eder."""
+        with self.db.get_cursor() as cursor:
+            cursor.execute("UPDATE active_tokens SET is_valid=0 WHERE key_text=?", (key,))
+    
+    def cleanup_expired(self):
+        """Süresi dolmuş tokenları siler."""
+        with self.db.get_cursor() as cursor:
+            cursor.execute("""
+                DELETE FROM active_tokens 
+                WHERE expires_at < ? OR is_valid=0
+            """, ((datetime.now() - timedelta(hours=1)).isoformat(),))
+
+
+# ============================================================
+# ADMIN İŞLEMLERİ
+# ============================================================
+
+class AdminManager:
+    """Admin kullanıcı yönetimi."""
+    
+    def __init__(self, db: Database):
+        self.db = db
+    
+    def create_admin(self, username: str, password: str) -> bool:
+        """Yeni admin oluşturur."""
+        from werkzeug.security import generate_password_hash
+        
+        hashed = generate_password_hash(password, method='pbkdf2:sha256', salt_length=16)
+        
+        try:
+            with self.db.get_cursor() as cursor:
+                cursor.execute("""
+                    INSERT INTO admin_users (username, password_hash)
+                    VALUES (?, ?)
+                """, (username, hashed))
+            return True
+        except sqlite3.IntegrityError:
+            return False
+    
+    def verify_admin(self, username: str, password: str) -> Optional[Dict]:
+        """Admin giriş doğrulama."""
+        from werkzeug.security import check_password_hash
+        
+        with self.db.get_cursor() as cursor:
+            cursor.execute("""
+                SELECT * FROM admin_users WHERE username=? AND is_active=1
+            """, (username,))
+            
+            row = cursor.fetchone()
+            if row and check_password_hash(row["password_hash"], password):
+                cursor.execute("""
+                    UPDATE admin_users SET last_login=? WHERE id=?
+                """, (datetime.now().isoformat(), row["id"]))
+                return dict(row)
+        
+        return None
+    
+    def admin_exists(self) -> bool:
+        """En az bir admin var mı?"""
+        with self.db.get_cursor() as cursor:
+            cursor.execute("SELECT COUNT(*) as c FROM admin_users WHERE is_active=1")
+            return cursor.fetchone()["c"] > 0
+
+
+# ============================================================
+# GLOBAL INSTANCES
+# ============================================================
+
+_db: Optional[Database] = None
+
+def get_db() -> Database:
+    global _db
+    if _db is None:
+        _db = Database()
+    return _db
+
+def get_key_manager() -> KeyManager:
+    return KeyManager(get_db())
+
+def get_token_store() -> TokenStore:
+    return TokenStore(get_db())
+
+def get_admin_manager() -> AdminManager:
+    return AdminManager(get_db())
