@@ -240,9 +240,11 @@ function api(method, endpoint, body = null) {
     };
     if (AUTH_TOKEN) opts.headers['Authorization'] = `Bearer ${AUTH_TOKEN}`;
     if (body) opts.body = JSON.stringify(body);
-    return fetch(`${API_BASE}${endpoint}`, opts).then(r => {
+    return fetch(`${API_BASE}${endpoint}`, opts).then(async r => {
         if (r.status === 401) { doLogout(); throw new Error('Oturum süresi doldu'); }
-        return r.json();
+        const data = await r.json();
+        if (!r.ok) { throw new Error(data.detail || `Sunucu hatası (${r.status})`); }
+        return data;
     });
 }
 
@@ -407,7 +409,7 @@ function loadDashboard() {
             }
             document.getElementById('statPlans').innerHTML = html || '<small class="text-secondary">Veri yok</small>';
         })
-        .catch(err => showToast('Dashboard yüklenemedi', 'error'));
+        .catch(err => { console.error('Dashboard error:', err); showToast('Dashboard yüklenemedi: ' + err.message, 'error'); });
     
     // Online kullanıcıları da yükle
     loadOnlineUsers();
@@ -481,7 +483,7 @@ function loadKeys() {
                 tbody.innerHTML = '<tr><td colspan="7" class="text-center text-secondary">Key bulunamadı</td></tr>';
             }
         })
-        .catch(err => showToast('Keyler yüklenemedi', 'error'));
+        .catch(err => { console.error('Load keys error:', err); showToast('Keyler yüklenemedi: ' + err.message, 'error'); });
 }
 
 function copyKey(key) {
@@ -578,9 +580,19 @@ function loadActivity() {
 // AUTO-LOGIN CHECK
 // ============================================================
 if (AUTH_TOKEN) {
-    api('GET', '/api/admin/stats')
-        .then(data => { if (data.stats) showMainPanel(); else doLogout(); })
-        .catch(() => doLogout());
+    fetch(`${API_BASE}/api/admin/stats`, {
+        headers: { 'Authorization': `Bearer ${AUTH_TOKEN}`, 'Content-Type': 'application/json' }
+    }).then(r => {
+        if (r.status === 401) { doLogout(); return; }
+        return r.json();
+    }).then(data => {
+        if (data && data.stats) showMainPanel(); 
+        else if (data) doLogout();
+    }).catch(err => {
+        // Sunucu ulaşılamıyor — yine de paneli göster, dashboard hata gösterecek
+        console.warn('Auto-login check failed:', err);
+        showMainPanel();
+    });
 }
 
 // Enter tuşu ile giriş

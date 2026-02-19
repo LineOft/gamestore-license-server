@@ -116,6 +116,17 @@ class Database:
             conn = getattr(self._local, 'conn', None)
             if conn is None or conn.closed:
                 self._local.conn = psycopg2.connect(self._db_url)
+            else:
+                # Neon.tech serverless bağlantı kopma kontrolü
+                try:
+                    conn.cursor().execute("SELECT 1")
+                    conn.commit()
+                except Exception:
+                    try:
+                        conn.close()
+                    except Exception:
+                        pass
+                    self._local.conn = psycopg2.connect(self._db_url)
             return self._local.conn
         else:
             if not hasattr(self._local, 'conn') or self._local.conn is None:
@@ -143,6 +154,10 @@ class Database:
             try:
                 conn.rollback()
             except Exception:
+                try:
+                    conn.close()
+                except Exception:
+                    pass
                 self._local.conn = None
             raise
 
@@ -383,11 +398,11 @@ class KeyManager:
     def revoke_key(self, key: str, reason: str = None) -> bool:
         """Key'i iptal eder."""
         with self.db.get_cursor() as cursor:
-            cursor.execute("UPDATE keys SET is_active=0 WHERE key=?", (key,))
+            cursor.execute("UPDATE keys SET is_active=FALSE WHERE key=?", (key,))
             if cursor.rowcount > 0:
                 self._log_activity(cursor, key, "revoked", reason)
                 # İlgili tokenları da iptal et
-                cursor.execute("UPDATE active_tokens SET is_valid=0 WHERE key_text=?", (key,))
+                cursor.execute("UPDATE active_tokens SET is_valid=FALSE WHERE key_text=?", (key,))
                 return True
             return False
     
@@ -400,7 +415,7 @@ class KeyManager:
             """, (key,))
             if cursor.rowcount > 0:
                 self._log_activity(cursor, key, "hwid_reset", "Admin tarafından sıfırlandı")
-                cursor.execute("UPDATE active_tokens SET is_valid=0 WHERE key_text=?", (key,))
+                cursor.execute("UPDATE active_tokens SET is_valid=FALSE WHERE key_text=?", (key,))
                 return True
             return False
     
@@ -411,13 +426,13 @@ class KeyManager:
             params = []
             
             if status_filter == "active":
-                query = "SELECT * FROM keys WHERE is_active=1 AND (expires_at IS NULL OR expires_at > ?) ORDER BY created_at DESC"
+                query = "SELECT * FROM keys WHERE is_active=TRUE AND (expires_at IS NULL OR expires_at > ?) ORDER BY created_at DESC"
                 params = [datetime.now().isoformat()]
             elif status_filter == "expired":
                 query = "SELECT * FROM keys WHERE expires_at IS NOT NULL AND expires_at <= ? ORDER BY created_at DESC"
                 params = [datetime.now().isoformat()]
             elif status_filter == "revoked":
-                query = "SELECT * FROM keys WHERE is_active=0 ORDER BY created_at DESC"
+                query = "SELECT * FROM keys WHERE is_active=FALSE ORDER BY created_at DESC"
                 params = []
             
             cursor.execute(query, params)
@@ -438,13 +453,13 @@ class KeyManager:
             cursor.execute("SELECT COUNT(*) as c FROM keys")
             stats["total_keys"] = cursor.fetchone()["c"]
             
-            cursor.execute("SELECT COUNT(*) as c FROM keys WHERE is_active=1")
+            cursor.execute("SELECT COUNT(*) as c FROM keys WHERE is_active=TRUE")
             stats["active_keys"] = cursor.fetchone()["c"]
             
             cursor.execute("SELECT COUNT(*) as c FROM keys WHERE hwid IS NOT NULL")
             stats["activated_keys"] = cursor.fetchone()["c"]
             
-            cursor.execute("SELECT COUNT(*) as c FROM keys WHERE is_active=0")
+            cursor.execute("SELECT COUNT(*) as c FROM keys WHERE is_active=FALSE")
             stats["revoked_keys"] = cursor.fetchone()["c"]
             
             now = datetime.now().isoformat()
@@ -501,7 +516,7 @@ class TokenStore:
         with self.db.get_cursor() as cursor:
             # Bu key+hwid için eski tokenları iptal et
             cursor.execute("""
-                UPDATE active_tokens SET is_valid=0 
+                UPDATE active_tokens SET is_valid=FALSE 
                 WHERE key_text=? AND hwid=?
             """, (key, hwid))
             
@@ -520,7 +535,7 @@ class TokenStore:
                 SELECT t.*, k.plan, k.is_active as key_active
                 FROM active_tokens t
                 JOIN keys k ON t.key_text = k.key
-                WHERE t.token=? AND t.hwid=? AND t.is_valid=1
+                WHERE t.token=? AND t.hwid=? AND t.is_valid=TRUE
             """, (token, hwid))
             
             row = cursor.fetchone()
@@ -530,12 +545,12 @@ class TokenStore:
             # Süre kontrolü
             expires = datetime.fromisoformat(row["expires_at"])
             if expires < datetime.now():
-                cursor.execute("UPDATE active_tokens SET is_valid=0 WHERE token=?", (token,))
+                cursor.execute("UPDATE active_tokens SET is_valid=FALSE WHERE token=?", (token,))
                 return None
             
             # Key hala aktif mi?
             if not row["key_active"]:
-                cursor.execute("UPDATE active_tokens SET is_valid=0 WHERE token=?", (token,))
+                cursor.execute("UPDATE active_tokens SET is_valid=FALSE WHERE token=?", (token,))
                 return None
             
             return dict(row)
@@ -549,7 +564,7 @@ class TokenStore:
         
         # Eski tokeni iptal et
         with self.db.get_cursor() as cursor:
-            cursor.execute("UPDATE active_tokens SET is_valid=0 WHERE token=?", (old_token,))
+            cursor.execute("UPDATE active_tokens SET is_valid=FALSE WHERE token=?", (old_token,))
         
         # Yeni token oluştur
         return self.create_token(token_data["key_text"], hwid, new_aes_key, lifetime)
@@ -557,14 +572,14 @@ class TokenStore:
     def invalidate_key_tokens(self, key: str):
         """Bir key'e ait tüm tokenları iptal eder."""
         with self.db.get_cursor() as cursor:
-            cursor.execute("UPDATE active_tokens SET is_valid=0 WHERE key_text=?", (key,))
+            cursor.execute("UPDATE active_tokens SET is_valid=FALSE WHERE key_text=?", (key,))
     
     def cleanup_expired(self):
         """Süresi dolmuş tokenları siler."""
         with self.db.get_cursor() as cursor:
             cursor.execute("""
                 DELETE FROM active_tokens 
-                WHERE expires_at < ? OR is_valid=0
+                WHERE expires_at < ? OR is_valid=FALSE
             """, ((datetime.now() - timedelta(hours=1)).isoformat(),))
 
 
@@ -600,7 +615,7 @@ class AdminManager:
         
         with self.db.get_cursor() as cursor:
             cursor.execute("""
-                SELECT * FROM admin_users WHERE username=? AND is_active=1
+                SELECT * FROM admin_users WHERE username=? AND is_active=TRUE
             """, (username,))
             
             row = cursor.fetchone()
@@ -615,7 +630,7 @@ class AdminManager:
     def admin_exists(self) -> bool:
         """En az bir admin var mı?"""
         with self.db.get_cursor() as cursor:
-            cursor.execute("SELECT COUNT(*) as c FROM admin_users WHERE is_active=1")
+            cursor.execute("SELECT COUNT(*) as c FROM admin_users WHERE is_active=TRUE")
             return cursor.fetchone()["c"] > 0
 
 
