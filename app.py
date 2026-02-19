@@ -422,7 +422,7 @@ async def list_keys(status: Optional[str] = None, admin=Depends(require_admin)):
         if k.get("hwid"):
             k["hwid"] = k["hwid"][:8] + "..."
     
-    return {"keys": keys, "total": len(keys)}
+    return {"keys": keys, "total": len(keys), "server_time": datetime.now().isoformat()}
 
 
 @app.post("/api/admin/revoke")
@@ -457,7 +457,7 @@ async def get_stats(admin=Depends(require_admin)):
     km = get_key_manager()
     stats = km.get_stats()
     
-    return {"stats": stats}
+    return {"stats": stats, "server_time": datetime.now().isoformat()}
 
 
 @app.get("/api/admin/security-events")

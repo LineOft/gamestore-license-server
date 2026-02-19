@@ -420,10 +420,13 @@ function loadOnlineUsers() {
         .then(data => {
             const tbody = document.getElementById('onlineUsersTable');
             tbody.innerHTML = '';
-            const now = new Date();
+            // Sunucu zamanını kullan (timezone farkı sorununu önler)
+            const serverNow = data.server_time ? new Date(data.server_time) : new Date();
             const onlineUsers = (data.keys || []).filter(k => {
                 if (!k.last_seen) return false;
-                return (now - new Date(k.last_seen)) < 600000; // 10 dk
+                const lastSeen = new Date(k.last_seen);
+                const diffMs = serverNow - lastSeen;
+                return diffMs >= 0 && diffMs < 600000; // 10 dk
             });
             
             if (onlineUsers.length === 0) {

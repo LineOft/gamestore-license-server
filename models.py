@@ -36,15 +36,32 @@ class _CursorProxy:
     - SQLite: parametre = ?,  tarih = str,  bool = 0/1
     - PostgreSQL: parametre = %s, tarih = datetime obj, bool = True/False
     Bu sınıf farkı şeffaf kapatır — üst katman hiçbir şey değiştirmez.
+    
+    Ayrıca ISO string parametrelerini datetime nesnesine çevirir,
+    böylece PostgreSQL TIMESTAMP sütunlarıyla karşılaştırma doğru çalışır.
     """
 
     def __init__(self, cursor, is_postgres: bool):
         self._cur = cursor
         self._pg = is_postgres
 
+    @staticmethod
+    def _convert_param(value):
+        """ISO tarih string'lerini datetime nesnesine çevirir (PostgreSQL uyumluluğu)."""
+        if isinstance(value, str) and len(value) >= 19:
+            # ISO format: 2026-02-19T16:05:49.123456
+            try:
+                return datetime.fromisoformat(value)
+            except (ValueError, TypeError):
+                pass
+        return value
+
     def execute(self, sql, params=None):
         if self._pg:
             sql = sql.replace("?", "%s")
+            # ISO string parametreleri datetime'a çevir (PG TIMESTAMP uyumu)
+            if params:
+                params = tuple(self._convert_param(p) for p in params)
         if params:
             self._cur.execute(sql, params)
         else:
@@ -492,11 +509,13 @@ class KeyManager:
             params = []
             
             if status_filter == "active":
+                now_str = datetime.now().isoformat()
                 query = "SELECT * FROM keys WHERE is_active=TRUE AND (expires_at IS NULL OR expires_at > ?) ORDER BY created_at DESC"
-                params = [datetime.now().isoformat()]
+                params = [now_str]
             elif status_filter == "expired":
+                now_str = datetime.now().isoformat()
                 query = "SELECT * FROM keys WHERE expires_at IS NOT NULL AND expires_at <= ? ORDER BY created_at DESC"
-                params = [datetime.now().isoformat()]
+                params = [now_str]
             elif status_filter == "revoked":
                 query = "SELECT * FROM keys WHERE is_active=FALSE ORDER BY created_at DESC"
                 params = []
@@ -543,7 +562,10 @@ class KeyManager:
             
             # Online kullanıcılar (son 10 dk)
             recent = (datetime.now() - timedelta(minutes=10)).isoformat()
-            cursor.execute("SELECT COUNT(*) as c FROM keys WHERE last_seen >= ?", (recent,))
+            cursor.execute(
+                "SELECT COUNT(*) as c FROM keys WHERE last_seen IS NOT NULL AND last_seen >= ?",
+                (recent,)
+            )
             stats["online_users"] = cursor.fetchone()["c"]
             
             return stats
