@@ -243,6 +243,18 @@ class Database:
             )
         """)
 
+        # Deploy takip tablosu — her başlangıçta kayıt eklenir
+        cursor.execute(f"""
+            CREATE TABLE IF NOT EXISTS deploy_tracker (
+                id {auto_pk},
+                started_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                db_type TEXT NOT NULL,
+                key_count_at_start INTEGER DEFAULT 0,
+                admin_count_at_start INTEGER DEFAULT 0,
+                note TEXT
+            )
+        """)
+
         # İndeksler
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_keys_key ON keys(key)")
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_keys_hwid ON keys(hwid)")
@@ -252,6 +264,60 @@ class Database:
 
         conn.commit()
         conn.close()
+
+    def record_deploy(self):
+        """Sunucu başlangıcını deploy_tracker tablosuna kaydeder."""
+        try:
+            with self.get_cursor() as cursor:
+                cursor.execute("SELECT COUNT(*) as c FROM keys")
+                key_count = cursor.fetchone()["c"]
+                cursor.execute("SELECT COUNT(*) as c FROM admin_users")
+                admin_count = cursor.fetchone()["c"]
+                db_type = "postgresql" if self._is_postgres else "sqlite"
+                cursor.execute(
+                    "INSERT INTO deploy_tracker (db_type, key_count_at_start, admin_count_at_start, note) VALUES (?, ?, ?, ?)",
+                    (db_type, key_count, admin_count, f"startup-{datetime.now().isoformat()}")
+                )
+        except Exception as e:
+            # deploy_tracker tablosu yoksa sessizce geç (ilk kez)
+            print(f"[WARN] Deploy kaydı yazılamadı: {e}")
+
+    def get_db_info(self) -> Dict[str, Any]:
+        """Veritabanı hakkında detaylı bilgi döndürür."""
+        info = {
+            "db_type": "postgresql" if self._is_postgres else "sqlite",
+            "db_path": self.db_path,
+            "tables": {},
+            "deploy_history": [],
+        }
+        try:
+            with self.get_cursor() as cursor:
+                # PostgreSQL özel bilgiler
+                if self._is_postgres:
+                    cursor.execute("SELECT current_database() as db_name")
+                    row = cursor.fetchone()
+                    info["pg_database"] = row["db_name"] if row else "?"
+                    cursor.execute("SELECT current_schema() as schema_name")
+                    row = cursor.fetchone()
+                    info["pg_schema"] = row["schema_name"] if row else "?"
+
+                # Tablo satır sayıları
+                for table in ["keys", "admin_users", "active_tokens", "security_events", "activity_logs", "deploy_tracker"]:
+                    try:
+                        cursor.execute(f"SELECT COUNT(*) as c FROM {table}")
+                        info["tables"][table] = cursor.fetchone()["c"]
+                    except Exception:
+                        info["tables"][table] = -1  # tablo yok
+
+                # Son 5 deploy kaydı
+                try:
+                    cursor.execute("SELECT * FROM deploy_tracker ORDER BY id DESC LIMIT 5")
+                    info["deploy_history"] = cursor.fetchall()
+                except Exception:
+                    info["deploy_history"] = []
+        except Exception as e:
+            info["error"] = str(e)
+        return info
 
 
 # ============================================================

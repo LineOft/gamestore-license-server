@@ -492,23 +492,23 @@ async def get_activity(limit: int = 100, admin=Depends(require_admin)):
 
 @app.get("/health")
 async def health_check():
-    """Sunucu sağlık kontrolü."""
+    """Sunucu sağlık kontrolü — detaylı veritabanı bilgisi dahil."""
     db = get_db()
-    key_count = 0
-    try:
-        with db.get_cursor() as cursor:
-            cursor.execute("SELECT COUNT(*) as c FROM keys")
-            key_count = cursor.fetchone()["c"]
-    except Exception:
-        pass
+    db_info = db.get_db_info()
     
     return {
         "status": "ok",
         "timestamp": datetime.now().isoformat(),
-        "version": "1.0.0",
-        "database": "postgresql" if db._is_postgres else "sqlite",
-        "db_path": db.db_path,
-        "total_keys": key_count
+        "version": "1.1.0",
+        "database": db_info["db_type"],
+        "db_path": db_info["db_path"],
+        "pg_database": db_info.get("pg_database", "N/A"),
+        "pg_schema": db_info.get("pg_schema", "N/A"),
+        "total_keys": db_info["tables"].get("keys", 0),
+        "total_admins": db_info["tables"].get("admin_users", 0),
+        "total_deploys": db_info["tables"].get("deploy_tracker", 0),
+        "tables": db_info["tables"],
+        "last_deploys": db_info.get("deploy_history", [])
     }
 
 
@@ -524,26 +524,45 @@ async def startup():
     db_type = "PostgreSQL (Neon.tech)" if db._is_postgres else "SQLite (EPHEMERAL!)"
     logger.info(f"Veritabanı hazır: {db.db_path} [{db_type}]")
     
-    if not db._is_postgres:
-        logger.warning("⚠️  DATABASE_URL ortam değişkeni YOK — SQLite kullanılıyor!")
-        logger.warning("⚠️  Render.com'da veriler her deploy'da SİLİNECEK!")
+    # *** CLOUD GÜVENLİK KONTROLÜ ***
+    is_cloud = os.environ.get("RENDER") or os.environ.get("RENDER_SERVICE_ID")
+    if is_cloud and not db._is_postgres:
+        logger.critical("=" * 60)
+        logger.critical("  KRITIK HATA: Render.com'da SQLite kullanılıyor!")
+        logger.critical("  DATABASE_URL ortam değişkeni ayarlanmamış!")
+        logger.critical("  Veriler her deploy'da SİLİNECEK!")
+        logger.critical("  Render Dashboard > Environment > DATABASE_URL ekleyin")
+        logger.critical("=" * 60)
     
-    # Key sayısını logla
-    try:
-        with db.get_cursor() as cursor:
-            cursor.execute("SELECT COUNT(*) as c FROM keys")
-            count = cursor.fetchone()["c"]
-            logger.info(f"Mevcut key sayısı: {count}")
-    except Exception as e:
-        logger.error(f"Key sayısı okunamadı: {e}")
+    # Deploy kaydını yaz
+    db.record_deploy()
+    
+    # Detaylı bilgi logla
+    db_info = db.get_db_info()
+    key_count = db_info["tables"].get("keys", 0)
+    admin_count = db_info["tables"].get("admin_users", 0)
+    deploy_count = db_info["tables"].get("deploy_tracker", 0)
+    
+    if db._is_postgres:
+        logger.info(f"PostgreSQL DB: {db_info.get('pg_database', '?')}, Schema: {db_info.get('pg_schema', '?')}")
+    
+    logger.info(f"Mevcut key sayısı: {key_count}")
+    logger.info(f"Admin sayısı: {admin_count}")
+    logger.info(f"Deploy sayısı: {deploy_count}")
+    
+    if key_count == 0:
+        logger.warning("⚠️  Veritabanında hiç key yok!")
+    if admin_count == 0:
+        logger.warning("⚠️  Veritabanında hiç admin yok! /api/admin/setup ile oluşturun.")
     
     # Süresi dolmuş tokenları temizle
     ts = get_token_store()
     ts.cleanup_expired()
     
     logger.info("=" * 50)
-    logger.info("  GameStore License Server v1.0.0")
+    logger.info("  GameStore License Server v1.1.0")
     logger.info(f"  Database: {db_type}")
+    logger.info(f"  Keys: {key_count} | Admins: {admin_count} | Deploys: {deploy_count}")
     logger.info(f"  Debug: {DEBUG_MODE}")
     logger.info(f"  Token Lifetime: {TOKEN_LIFETIME}s")
     logger.info("=" * 50)
