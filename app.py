@@ -173,6 +173,11 @@ class HeartbeatRequest(BaseModel):
     timestamp: Optional[int] = None
     exe_hash: Optional[str] = None
 
+class LogoutRequest(BaseModel):
+    token: str
+    hwid: str
+    timestamp: Optional[int] = None
+
 class SecurityEventRequest(BaseModel):
     hwid: str
     threat_type: str
@@ -308,6 +313,28 @@ async def heartbeat(req: HeartbeatRequest, request: Request):
                       (datetime.now().isoformat(), ip, token_data["key_text"]))
     
     return {"success": True, "alive": True}
+
+
+@app.post("/api/logout")
+async def logout(req: LogoutRequest, request: Request):
+    """Client kapatılırken çağrılır — kullanıcıyı offline yapar."""
+    ip = get_client_ip(request)
+    
+    ts = get_token_store()
+    token_data = ts.validate_token(req.token, req.hwid)
+    
+    if token_data:
+        key_text = token_data["key_text"]
+        # last_seen'i eski bir tarihe çek → anında offline
+        with get_db().get_cursor() as cursor:
+            cursor.execute("UPDATE keys SET last_seen=? WHERE key=?",
+                          ("2000-01-01T00:00:00", key_text))
+        # Token'ı iptal et
+        ts.invalidate_token(req.token)
+        logger.info(f"Logout: key={key_text[:8]}..., ip={ip}")
+        return {"success": True, "message": "Logged out"}
+    
+    return {"success": False, "message": "Invalid token"}
 
 
 @app.post("/api/security-event")

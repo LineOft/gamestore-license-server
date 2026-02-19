@@ -426,7 +426,7 @@ function loadOnlineUsers() {
                 if (!k.last_seen) return false;
                 const lastSeen = new Date(k.last_seen);
                 const diffMs = serverNow - lastSeen;
-                return diffMs >= 0 && diffMs < 600000; // 10 dk
+                return diffMs >= 0 && diffMs < 240000; // 4 dk (heartbeat 3 dk)
             });
             
             if (onlineUsers.length === 0) {

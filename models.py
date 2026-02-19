@@ -560,8 +560,8 @@ class KeyManager:
             cursor.execute("SELECT plan, COUNT(*) as c FROM keys GROUP BY plan")
             stats["plan_distribution"] = {row["plan"]: row["c"] for row in cursor.fetchall()}
             
-            # Online kullanıcılar (son 10 dk)
-            recent = (datetime.now() - timedelta(minutes=10)).isoformat()
+            # Online kullanıcılar (son 4 dk — heartbeat 3 dk'da bir)
+            recent = (datetime.now() - timedelta(minutes=4)).isoformat()
             cursor.execute(
                 "SELECT COUNT(*) as c FROM keys WHERE last_seen IS NOT NULL AND last_seen >= ?",
                 (recent,)
@@ -656,6 +656,11 @@ class TokenStore:
         
         # Yeni token oluştur
         return self.create_token(token_data["key_text"], hwid, new_aes_key, lifetime)
+    
+    def invalidate_token(self, token: str):
+        """Tek bir token'ı iptal eder."""
+        with self.db.get_cursor() as cursor:
+            cursor.execute("UPDATE active_tokens SET is_valid=FALSE WHERE token=?", (token,))
     
     def invalidate_key_tokens(self, key: str):
         """Bir key'e ait tüm tokenları iptal eder."""
