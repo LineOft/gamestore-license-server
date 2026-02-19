@@ -493,10 +493,22 @@ async def get_activity(limit: int = 100, admin=Depends(require_admin)):
 @app.get("/health")
 async def health_check():
     """Sunucu sağlık kontrolü."""
+    db = get_db()
+    key_count = 0
+    try:
+        with db.get_cursor() as cursor:
+            cursor.execute("SELECT COUNT(*) as c FROM keys")
+            key_count = cursor.fetchone()["c"]
+    except Exception:
+        pass
+    
     return {
         "status": "ok",
         "timestamp": datetime.now().isoformat(),
-        "version": "1.0.0"
+        "version": "1.0.0",
+        "database": "postgresql" if db._is_postgres else "sqlite",
+        "db_path": db.db_path,
+        "total_keys": key_count
     }
 
 
@@ -509,7 +521,21 @@ async def startup():
     """Sunucu başlangıcında çalışır."""
     # Veritabanını başlat
     db = get_db()
-    logger.info(f"Veritabanı hazır: {db.db_path}")
+    db_type = "PostgreSQL (Neon.tech)" if db._is_postgres else "SQLite (EPHEMERAL!)"
+    logger.info(f"Veritabanı hazır: {db.db_path} [{db_type}]")
+    
+    if not db._is_postgres:
+        logger.warning("⚠️  DATABASE_URL ortam değişkeni YOK — SQLite kullanılıyor!")
+        logger.warning("⚠️  Render.com'da veriler her deploy'da SİLİNECEK!")
+    
+    # Key sayısını logla
+    try:
+        with db.get_cursor() as cursor:
+            cursor.execute("SELECT COUNT(*) as c FROM keys")
+            count = cursor.fetchone()["c"]
+            logger.info(f"Mevcut key sayısı: {count}")
+    except Exception as e:
+        logger.error(f"Key sayısı okunamadı: {e}")
     
     # Süresi dolmuş tokenları temizle
     ts = get_token_store()
@@ -517,6 +543,7 @@ async def startup():
     
     logger.info("=" * 50)
     logger.info("  GameStore License Server v1.0.0")
+    logger.info(f"  Database: {db_type}")
     logger.info(f"  Debug: {DEBUG_MODE}")
     logger.info(f"  Token Lifetime: {TOKEN_LIFETIME}s")
     logger.info("=" * 50)
