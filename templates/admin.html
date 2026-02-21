@@ -135,15 +135,15 @@
         <div id="sec-keys" class="section" style="display:none">
             <div class="d-flex justify-content-between align-items-center mb-4">
                 <h4 class="text-white mb-0">🔑 Key Yönetimi</h4>
-                <div>
-                    <select id="keyFilter" class="form-select form-select-sm bg-dark text-white border-secondary d-inline-block w-auto" onchange="loadKeys()">
-                        <option value="">Tümü</option>
-                        <option value="active">Aktif</option>
-                        <option value="expired">Süresi Dolmuş</option>
-                        <option value="revoked">İptal Edilmiş</option>
-                    </select>
-                </div>
             </div>
+            <div class="d-flex gap-2 mb-3 flex-wrap" id="keyFilterBtns">
+                <button class="btn btn-sm btn-outline-light active" onclick="setKeyFilter('', this)">📋 Tümü <span class="badge bg-secondary ms-1" id="fcAll">0</span></button>
+                <button class="btn btn-sm btn-outline-success" onclick="setKeyFilter('active', this)">✅ Aktif <span class="badge bg-success ms-1" id="fcActive">0</span></button>
+                <button class="btn btn-sm btn-outline-info" onclick="setKeyFilter('unused', this)">🆕 Kullanılmamış <span class="badge bg-info ms-1" id="fcUnused">0</span></button>
+                <button class="btn btn-sm btn-outline-danger" onclick="setKeyFilter('expired', this)">⏰ Süresi Dolmuş <span class="badge bg-danger ms-1" id="fcExpired">0</span></button>
+                <button class="btn btn-sm btn-outline-secondary" onclick="setKeyFilter('revoked', this)">🚫 İptal Edilmiş <span class="badge bg-secondary ms-1" id="fcRevoked">0</span></button>
+            </div>
+            <input type="hidden" id="keyFilter" value="">
             <div class="table-responsive">
                 <table class="table table-dark table-hover">
                     <thead>
@@ -452,16 +452,62 @@ function loadOnlineUsers() {
 // ============================================================
 // KEY YÖNETİMİ
 // ============================================================
+let currentKeyFilter = '';
+
+function setKeyFilter(filter, btn) {
+    currentKeyFilter = filter;
+    document.getElementById('keyFilter').value = filter;
+    // Buton stillerini güncelle
+    document.querySelectorAll('#keyFilterBtns .btn').forEach(b => {
+        b.classList.remove('active');
+        b.classList.remove('btn-success', 'btn-info', 'btn-danger', 'btn-secondary', 'btn-light');
+        // outline versiyonuna geri dön
+        const classes = [...b.classList];
+        const outlineClass = classes.find(c => c.startsWith('btn-outline-'));
+        if (!outlineClass) {
+            // active olan butonun outline'ı kaldırılmıştı, tekrar ekle
+        }
+    });
+    if (btn) btn.classList.add('active');
+    loadKeys();
+}
+
 function loadKeys() {
-    const filter = document.getElementById('keyFilter')?.value || '';
-    const query = filter ? `?status=${filter}` : '';
-    
-    api('GET', `/api/admin/keys${query}`)
-        .then(data => {
+    // Önce sayıları güncellemek için tüm keyleri çek
+    api('GET', '/api/admin/keys')
+        .then(allData => {
+            const allKeys = allData.keys || [];
+            const now = new Date();
+            let cAll = allKeys.length;
+            let cActive = 0, cUnused = 0, cExpired = 0, cRevoked = 0;
+            allKeys.forEach(k => {
+                if (!k.is_active) { cRevoked++; return; }
+                if (k.expires_at && new Date(k.expires_at) < now) { cExpired++; return; }
+                if (k.hwid) { cActive++; } else { cUnused++; }
+            });
+            document.getElementById('fcAll').textContent = cAll;
+            document.getElementById('fcActive').textContent = cActive;
+            document.getElementById('fcUnused').textContent = cUnused;
+            document.getElementById('fcExpired').textContent = cExpired;
+            document.getElementById('fcRevoked').textContent = cRevoked;
+
+            // Filtreye göre keyleri göster
+            const filter = document.getElementById('keyFilter')?.value || '';
+            let filtered = allKeys;
+            if (filter === 'active') {
+                filtered = allKeys.filter(k => k.is_active && k.hwid && (!k.expires_at || new Date(k.expires_at) >= now));
+            } else if (filter === 'unused') {
+                filtered = allKeys.filter(k => k.is_active && !k.hwid && (!k.expires_at || new Date(k.expires_at) >= now));
+            } else if (filter === 'expired') {
+                filtered = allKeys.filter(k => k.expires_at && new Date(k.expires_at) < now);
+            } else if (filter === 'revoked') {
+                filtered = allKeys.filter(k => !k.is_active);
+            }
+
             const tbody = document.getElementById('keysTable');
             tbody.innerHTML = '';
             
-            (data.keys || []).forEach(k => {
+            filtered.forEach(k => {
                 const usageDuration = formatUsageDuration(k.activated_at, k.last_seen);
                 const lastSeenText = k.last_seen ? formatTimeAgo(k.last_seen) : '-';
                 const isOnlineNow = k.last_seen && (new Date() - new Date(k.last_seen)) < 600000;
@@ -482,7 +528,7 @@ function loadKeys() {
                 </tr>`;
             });
             
-            if (!data.keys?.length) {
+            if (!filtered.length) {
                 tbody.innerHTML = '<tr><td colspan="7" class="text-center text-secondary">Key bulunamadı</td></tr>';
             }
         })
